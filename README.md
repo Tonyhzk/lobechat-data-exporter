@@ -330,6 +330,6 @@ JSON 编辑器展示各模块数据，支持编辑、验证、格式化
 
 **⭐ 如果这个项目对你有帮助，请给个 Star！⭐**
 
-Made with ❤️ by [Your Name]
+Made with ❤️ by [Tonyhzk]
 
 </div>
