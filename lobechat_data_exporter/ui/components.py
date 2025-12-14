@@ -13,6 +13,9 @@ from ..config import *
 
 def create_toolbar(master, app):
     """创建顶部工具栏"""
+    import webbrowser
+    from ..config import GITHUB_URL
+    
     toolbar = ttk.Frame(master)
     toolbar.pack(fill=X, padx=10, pady=5)
     
@@ -45,6 +48,16 @@ def create_toolbar(master, app):
         width=BUTTON_WIDTH
     )
     about_btn.pack(side=RIGHT, padx=5)
+    
+    # GitHub按钮
+    github_btn = ttk.Button(
+        toolbar,
+        text="🌐 GitHub",
+        command=lambda: webbrowser.open(GITHUB_URL),
+        bootstyle="primary-outline",
+        width=BUTTON_WIDTH
+    )
+    github_btn.pack(side=RIGHT, padx=5)
     
     return toolbar
 
@@ -99,9 +112,9 @@ def create_stats_area(parent):
     stats_container.pack(fill=X)
     
     stat_labels = {}
+    # 注：移除会话数量统计，因为一个助手只有一个会话，会话与助手数量相同
     stat_items = [
         ("助手数量", "agentCount"),
-        ("会话数量", "sessionCount"),
         ("主题数量", "topicCount"),
         ("消息数量", "messageCount")
     ]

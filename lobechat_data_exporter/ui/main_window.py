@@ -19,7 +19,10 @@ from ..core.parser import LobeChatParser
 from ..exporters.markdown_exporter import MarkdownExporter
 from ..exporters.json_exporter import JSONExporter
 from ..utils.clipboard import ClipboardManager
-from ..utils.file_utils import safe_filename, ensure_unique_name, format_datetime, get_app_path
+from ..utils.file_utils import (
+    safe_filename, ensure_unique_name, format_datetime, get_app_path,
+    write_file_with_timestamp, get_time_range_from_messages
+)
 from .components import create_toolbar, create_file_selector, create_stats_area, create_export_options, create_log_area
 from .tree_view import TreeViewController
 from .context_menu import ContextMenuManager
@@ -88,6 +91,9 @@ class LobeChatDataExporter:
     
     def create_ui(self):
         """创建用户界面"""
+        # 初始化剪贴板管理器（必须在创建右键菜单之前）
+        self.clipboard_manager = ClipboardManager(self.master)
+        
         # 顶部工具栏
         create_toolbar(self.master, self)
         
@@ -108,40 +114,48 @@ class LobeChatDataExporter:
         
         # 4. 日志显示区域
         self.log_text = create_log_area(main_container, self.current_theme)
-        
-        # 初始化剪贴板管理器
-        self.clipboard_manager = ClipboardManager(self.master)
     
     def create_main_content(self, parent):
-        """创建主内容区域"""
-        paned = ttk.PanedWindow(parent, orient=HORIZONTAL)
-        paned.grid(row=2, column=0, sticky=(N, S, E, W), pady=(0, 10))
-        
-        # 左侧：数据选项卡控制器（新版）
-        left_frame = ttk.LabelFrame(paned, text="📂 数据结构", padding=10)
-        paned.add(left_frame, weight=2)
+        """创建主内容区域 - 仅包含数据选项卡控制器"""
+        # 数据选项卡控制器（新版）
+        data_frame = ttk.LabelFrame(parent, text="📂 数据结构", padding=10)
+        data_frame.grid(row=2, column=0, sticky=(N, S, E, W), pady=(0, 10))
         
         # 创建数据选项卡控制器
-        self.data_tabs_controller = DataTabsController(left_frame, self)
+        self.data_tabs_controller = DataTabsController(data_frame, self)
+        
+        # 创建右键菜单管理器（必须先创建，以便绑定事件）
+        self.context_menu_manager = ContextMenuManager(self.master, self)
         
         # 获取综合视图的树形控制器（用于右键菜单）
         if "overview" in self.data_tabs_controller.tabs:
             self.tree_controller = self.data_tabs_controller.tabs["overview"]["controller"]
             self.data_tree = self.tree_controller.tree
             
-            # 创建右键菜单管理器
-            self.context_menu_manager = ContextMenuManager(self.master, self)
-            
-            # 绑定右键菜单
-            self.data_tree.bind("<Button-3>", self.context_menu_manager.show_context_menu)
-            self.data_tree.bind("<Button-2>", self.context_menu_manager.show_context_menu)
+            # 绑定右键菜单事件
+            self._bind_context_menu(self.data_tree)
+        else:
+            self.tree_controller = None
+            self.data_tree = None
+            self.log_message("警告：未找到综合视图选项卡", "WARNING")
         
-        # 右侧：导出选项
-        right_frame = ttk.LabelFrame(paned, text="📤 导出选项", padding=10)
-        paned.add(right_frame, weight=1)
+        # 从数据选项卡控制器获取导出选项变量
+        if hasattr(self.data_tabs_controller, 'md_export_mode'):
+            self.md_export_mode = self.data_tabs_controller.md_export_mode
+        else:
+            self.md_export_mode = tk.StringVar(value="directory")
         
-        self.md_export_mode, self.md_include_metadata, self.md_include_system_prompt, \
-        self.json_export_vars = create_export_options(right_frame, self)
+        if hasattr(self.data_tabs_controller, 'md_include_metadata'):
+            self.md_include_metadata = self.data_tabs_controller.md_include_metadata
+        else:
+            self.md_include_metadata = tk.BooleanVar(value=True)
+        
+        if hasattr(self.data_tabs_controller, 'md_include_system_prompt'):
+            self.md_include_system_prompt = self.data_tabs_controller.md_include_system_prompt
+        else:
+            self.md_include_system_prompt = tk.BooleanVar(value=True)
+        
+        self.json_export_vars = {}
     
     def browse_file(self):
         """浏览选择文件"""
@@ -152,6 +166,8 @@ class LobeChatDataExporter:
         if file_path:
             self.file_path_var.set(file_path)
             self.log_message(f"已选择文件: {file_path}", "INFO")
+            # 自动触发解析
+            self.master.after(100, self.parse_json_file)
     
     def parse_json_file(self):
         """解析JSON文件"""
@@ -212,7 +228,20 @@ class LobeChatDataExporter:
         
         mode = self.md_export_mode.get()
         
-        if mode == "directory":
+        if mode == "single_file":
+            # 全部内容为一个文件
+            self.export_markdown_single_file()
+        elif mode == "agent_file":
+            # 每个助手一个文件
+            self.export_markdown_agent_files()
+        elif mode == "topic_file":
+            # 每个主题一个文件：助手/主题.md
+            self.export_markdown_directory()
+        elif mode == "message_file":
+            # 每个对话一个文件：助手/主题/对话.md
+            self.export_markdown_message_files()
+        # 保持旧模式兼容
+        elif mode == "directory":
             self.export_markdown_directory()
         elif mode == "single_topic":
             messagebox.showinfo("提示", "请在左侧树形视图中右键点击主题节点进行导出")
@@ -220,6 +249,225 @@ class LobeChatDataExporter:
             messagebox.showinfo("提示", "请在左侧树形视图中右键点击助手节点进行整合导出")
         elif mode == "agent_separate":
             messagebox.showinfo("提示", "请在左侧树形视图中右键点击助手节点进行分离导出")
+    
+    def export_markdown_single_file(self):
+        """导出所有对话为单个Markdown文件"""
+        file_path = filedialog.asksaveasfilename(
+            title="保存Markdown文件",
+            defaultextension=".md",
+            filetypes=[("Markdown文件", "*.md"), ("所有文件", "*.*")],
+            initialfile=f"{self.parsed_data['sourceFileName'].replace('.json', '')}_all.md"
+        )
+        
+        if not file_path:
+            return
+        
+        self.log_message("开始导出Markdown（全部为一个文件）...", "INFO")
+        
+        try:
+            exporter = MarkdownExporter(self.parsed_data)
+            include_metadata = self.md_include_metadata.get()
+            include_system_prompt = self.md_include_system_prompt.get()
+            
+            lines = [
+                "# LobeChat 全部对话",
+                "",
+                f"- **源文件**: `{self.parsed_data['sourceFileName']}`",
+                f"- **助手数**: {self.parsed_data['stats']['agentCount']}",
+                f"- **主题数**: {self.parsed_data['stats']['topicCount']}",
+                f"- **消息数**: {self.parsed_data['stats']['messageCount']}",
+                "",
+                "---",
+                ""
+            ]
+            
+            for group in self.parsed_data["groups"]:
+                # 助手标题
+                lines.append(f"# 助手: {group['agentLabel']}")
+                lines.append("")
+                
+                # 助手系统提示词
+                if include_system_prompt:
+                    agent = group.get("agent")
+                    if agent:
+                        system_role = agent.get("systemRole", "")
+                        if system_role:
+                            lines.append("## 系统提示词")
+                            lines.append("")
+                            lines.append("```")
+                            lines.append(system_role)
+                            lines.append("```")
+                            lines.append("")
+                
+                # 遍历主题
+                for session_group in group["sessions"]:
+                    for topic_group in session_group["topics"]:
+                        lines.append(f"## 主题: {topic_group['topicLabel']}")
+                        lines.append("")
+                        
+                        messages = topic_group.get("messages", [])
+                        for msg in messages:
+                            role = msg.get("role", "unknown")
+                            content = msg.get("content", "")
+                            
+                            role_label = "👤 用户" if role == "user" else "🤖 助手" if role == "assistant" else f"⚙️ {role}"
+                            
+                            lines.append(f"### {role_label}")
+                            
+                            if include_metadata:
+                                created_at = msg.get("createdAt")
+                                model = msg.get("model", "")
+                                if created_at or model:
+                                    meta_parts = []
+                                    if created_at:
+                                        meta_parts.append(f"时间: {format_datetime(created_at)}")
+                                    if model:
+                                        meta_parts.append(f"模型: {model}")
+                                    lines.append(f"*{' | '.join(meta_parts)}*")
+                            
+                            lines.append("")
+                            lines.append(content if content else "(空)")
+                            lines.append("")
+                        
+                        lines.append("---")
+                        lines.append("")
+                
+                lines.append("")
+            
+            # 写入文件
+            content = "\n".join(lines)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            
+            self.log_message(f"✅ 导出完成！文件: {file_path}", "SUCCESS")
+            messagebox.showinfo("导出成功", f"已导出到:\n{file_path}")
+            
+        except Exception as e:
+            self.log_message(f"导出失败: {str(e)}", "ERROR")
+            messagebox.showerror("导出失败", str(e))
+    
+    def export_markdown_agent_files(self):
+        """导出每个助手为单独的Markdown文件"""
+        output_dir = filedialog.askdirectory(title="选择导出目录")
+        if not output_dir:
+            return
+        
+        self.log_message("开始导出Markdown（每个助手一个文件）...", "INFO")
+        
+        try:
+            export_path = Path(output_dir) / f"{self.parsed_data['sourceFileName'].replace('.json', '')}_agents"
+            export_path.mkdir(exist_ok=True)
+            
+            exporter = MarkdownExporter(self.parsed_data)
+            include_metadata = self.md_include_metadata.get()
+            include_system_prompt = self.md_include_system_prompt.get()
+            
+            file_count = 0
+            index_lines = [
+                "# LobeChat 助手列表",
+                "",
+                f"- **源文件**: `{self.parsed_data['sourceFileName']}`",
+                ""
+            ]
+            
+            used_names = set()
+            for group in self.parsed_data["groups"]:
+                # 文件名
+                filename = safe_filename(group["agentLabel"], group["agentId"])
+                filename = ensure_unique_name(filename, used_names)
+                
+                lines = [
+                    f"# {group['agentLabel']}",
+                    "",
+                ]
+                
+                # 助手系统提示词
+                if include_system_prompt:
+                    agent = group.get("agent")
+                    if agent:
+                        system_role = agent.get("systemRole", "")
+                        if system_role:
+                            lines.append("## 系统提示词")
+                            lines.append("")
+                            lines.append("```")
+                            lines.append(system_role)
+                            lines.append("```")
+                            lines.append("")
+                
+                # 统计信息
+                topic_count = sum(len(s["topics"]) for s in group["sessions"])
+                message_count = sum(sum(len(t["messages"]) for t in s["topics"]) for s in group["sessions"])
+                
+                lines.append(f"- **主题数**: {topic_count}")
+                lines.append(f"- **消息数**: {message_count}")
+                lines.append("")
+                lines.append("---")
+                lines.append("")
+                
+                # 遍历主题
+                for session_group in group["sessions"]:
+                    for topic_group in session_group["topics"]:
+                        lines.append(f"## {topic_group['topicLabel']}")
+                        lines.append("")
+                        
+                        messages = topic_group.get("messages", [])
+                        for msg in messages:
+                            role = msg.get("role", "unknown")
+                            content = msg.get("content", "")
+                            
+                            role_label = "👤 用户" if role == "user" else "🤖 助手" if role == "assistant" else f"⚙️ {role}"
+                            
+                            lines.append(f"### {role_label}")
+                            
+                            if include_metadata:
+                                created_at = msg.get("createdAt")
+                                model = msg.get("model", "")
+                                if created_at or model:
+                                    meta_parts = []
+                                    if created_at:
+                                        meta_parts.append(f"时间: {format_datetime(created_at)}")
+                                    if model:
+                                        meta_parts.append(f"模型: {model}")
+                                    lines.append(f"*{' | '.join(meta_parts)}*")
+                            
+                            lines.append("")
+                            lines.append(content if content else "(空)")
+                            lines.append("")
+                        
+                        lines.append("---")
+                        lines.append("")
+                
+                # 写入文件
+                file_path = export_path / f"{filename}.md"
+                content = "\n".join(lines)
+                
+                # 获取时间信息
+                agent_all_messages = []
+                for session_group in group["sessions"]:
+                    for topic_group in session_group["topics"]:
+                        agent_all_messages.extend(topic_group.get("messages", []))
+                
+                agent_created_at, agent_modified_at = get_time_range_from_messages(agent_all_messages)
+                agent = group.get("agent")
+                if agent and agent.get("createdAt"):
+                    agent_created_at = agent.get("createdAt")
+                
+                write_file_with_timestamp(str(file_path), content, agent_created_at, agent_modified_at)
+                file_count += 1
+                
+                # 索引
+                index_lines.append(f"- [{group['agentLabel']}]({filename}.md) - {topic_count}主题, {message_count}消息")
+            
+            # 写入索引
+            (export_path / "index.md").write_text("\n".join(index_lines), encoding='utf-8')
+            file_count += 1
+            
+            self.log_message(f"✅ 导出完成！共{file_count}个文件", "SUCCESS")
+            messagebox.showinfo("导出成功", f"已导出{file_count}个Markdown文件到:\n{export_path}")
+            
+        except Exception as e:
+            self.log_message(f"导出失败: {str(e)}", "ERROR")
+            messagebox.showerror("导出失败", str(e))
     
     def export_markdown_directory(self):
         """按目录结构导出Markdown"""
@@ -251,9 +499,22 @@ class LobeChatDataExporter:
                 agent_dir = export_path / agent_dir_name
                 agent_dir.mkdir(exist_ok=True)
                 
-                # README
+                # README - 使用助手的时间信息
                 readme_content = exporter.build_agent_readme(group, include_metadata, include_system_prompt)
-                (agent_dir / "README.md").write_text(readme_content, encoding='utf-8')
+                readme_path = str(agent_dir / "README.md")
+                
+                # 收集助手所有消息以获取时间范围
+                agent_all_messages = []
+                for session_group in group["sessions"]:
+                    for topic_group in session_group["topics"]:
+                        agent_all_messages.extend(topic_group.get("messages", []))
+                
+                agent_created_at, agent_modified_at = get_time_range_from_messages(agent_all_messages)
+                agent = group.get("agent")
+                if agent and agent.get("createdAt"):
+                    agent_created_at = agent.get("createdAt")
+                
+                write_file_with_timestamp(readme_path, readme_content, agent_created_at, agent_modified_at)
                 file_count += 1
                 
                 # 索引
@@ -278,10 +539,166 @@ class LobeChatDataExporter:
                             group["agentLabel"], include_metadata, include_system_prompt
                         )
                         
-                        (agent_dir / f"{filename}.md").write_text(content, encoding='utf-8')
+                        file_path = str(agent_dir / f"{filename}.md")
+                        
+                        # 获取主题的时间信息
+                        topic = topic_group.get("topic")
+                        messages = topic_group.get("messages", [])
+                        created_at = topic.get("createdAt") if topic else None
+                        _, latest_modified = get_time_range_from_messages(messages)
+                        modified_at = latest_modified or (topic.get("updatedAt") if topic else None) or created_at
+                        
+                        write_file_with_timestamp(file_path, content, created_at, modified_at)
                         file_count += 1
             
             # 写入索引
+            (export_path / "index.md").write_text("\n".join(index_lines), encoding='utf-8')
+            file_count += 1
+            
+            self.log_message(f"✅ 导出完成！共{file_count}个文件", "SUCCESS")
+            messagebox.showinfo("导出成功", f"已导出{file_count}个Markdown文件到:\n{export_path}")
+            
+        except Exception as e:
+            self.log_message(f"导出失败: {str(e)}", "ERROR")
+            messagebox.showerror("导出失败", str(e))
+    
+    def export_markdown_message_files(self):
+        """按对话导出Markdown - 每个对话一个文件（三级目录结构：助手/主题/对话.md）"""
+        output_dir = filedialog.askdirectory(title="选择导出目录")
+        if not output_dir:
+            return
+        
+        self.log_message("开始导出Markdown（每个对话一个文件）...", "INFO")
+        
+        try:
+            export_path = Path(output_dir) / f"{self.parsed_data['sourceFileName'].replace('.json', '')}_messages"
+            export_path.mkdir(exist_ok=True)
+            
+            exporter = MarkdownExporter(self.parsed_data)
+            include_metadata = self.md_include_metadata.get()
+            include_system_prompt = self.md_include_system_prompt.get()
+            
+            file_count = 0
+            index_lines = [
+                "# LobeChat 对话索引",
+                "",
+                f"- **源文件**: `{self.parsed_data['sourceFileName']}`",
+                f"- **导出模式**: 每个对话一个文件",
+                ""
+            ]
+            
+            for group in self.parsed_data["groups"]:
+                # 创建助手目录
+                agent_dir_name = safe_filename(group["agentLabel"], group["agentId"])
+                agent_dir = export_path / agent_dir_name
+                agent_dir.mkdir(exist_ok=True)
+                
+                # 助手 README
+                readme_content = exporter.build_agent_readme(group, include_metadata, include_system_prompt)
+                readme_path = str(agent_dir / "README.md")
+                
+                agent_all_messages = []
+                for session_group in group["sessions"]:
+                    for topic_group in session_group["topics"]:
+                        agent_all_messages.extend(topic_group.get("messages", []))
+                
+                agent_created_at, agent_modified_at = get_time_range_from_messages(agent_all_messages)
+                agent = group.get("agent")
+                if agent and agent.get("createdAt"):
+                    agent_created_at = agent.get("createdAt")
+                
+                write_file_with_timestamp(readme_path, readme_content, agent_created_at, agent_modified_at)
+                file_count += 1
+                
+                # 索引
+                session_count = len(group["sessions"])
+                topic_count = sum(len(s["topics"]) for s in group["sessions"])
+                message_count = sum(sum(len(t["messages"]) for t in s["topics"]) for s in group["sessions"])
+                
+                index_lines.append(
+                    f"- [{group['agentLabel']}]({agent_dir_name}/README.md) - "
+                    f"{session_count}会话, {topic_count}主题, {message_count}消息"
+                )
+                
+                # 遍历主题
+                used_topic_names = set()
+                for session_group in group["sessions"]:
+                    for topic_group in session_group["topics"]:
+                        # 创建主题目录
+                        topic_dir_name = safe_filename(topic_group["topicLabel"], topic_group["topicId"])
+                        topic_dir_name = ensure_unique_name(topic_dir_name, used_topic_names)
+                        topic_dir = agent_dir / topic_dir_name
+                        topic_dir.mkdir(exist_ok=True)
+                        
+                        # 主题 README
+                        topic = topic_group.get("topic")
+                        messages = topic_group.get("messages", [])
+                        
+                        topic_readme_lines = [
+                            f"# {topic_group['topicLabel']}",
+                            "",
+                            f"- **消息数**: {len(messages)}",
+                        ]
+                        if topic and topic.get("createdAt"):
+                            topic_readme_lines.append(f"- **创建时间**: {format_datetime(topic.get('createdAt'))}")
+                        
+                        topic_readme_lines.append("")
+                        topic_readme_lines.append("## 对话列表")
+                        topic_readme_lines.append("")
+                        
+                        # 导出每条消息为单独文件
+                        for i, msg in enumerate(messages):
+                            role = msg.get("role", "unknown")
+                            content = msg.get("content", "")
+                            created_at = msg.get("createdAt")
+                            model = msg.get("model", "")
+                            
+                            # 生成文件名：序号_角色_时间
+                            time_str = format_datetime(created_at).replace(":", "-").replace(" ", "_") if created_at else ""
+                            msg_filename = f"{i+1:04d}_{role}_{time_str}"
+                            msg_filename = safe_filename(msg_filename, msg.get("id", ""))
+                            
+                            # 构建消息内容
+                            msg_lines = [
+                                f"# 消息 #{i+1}",
+                                "",
+                                f"- **角色**: {role}",
+                                f"- **时间**: {format_datetime(created_at) if created_at else '-'}",
+                            ]
+                            if model:
+                                msg_lines.append(f"- **模型**: {model}")
+                            
+                            if include_metadata:
+                                metadata = msg.get("metadata") or {}
+                                tokens = metadata.get("totalTokens", 0)
+                                if tokens:
+                                    msg_lines.append(f"- **Token**: {tokens}")
+                            
+                            msg_lines.append("")
+                            msg_lines.append("## 内容")
+                            msg_lines.append("")
+                            msg_lines.append(content if content else "(空)")
+                            
+                            # 写入文件
+                            msg_file_path = str(topic_dir / f"{msg_filename}.md")
+                            msg_content = "\n".join(msg_lines)
+                            write_file_with_timestamp(msg_file_path, msg_content, created_at, created_at)
+                            file_count += 1
+                            
+                            # 添加到主题README索引
+                            role_emoji = "👤" if role == "user" else "🤖" if role == "assistant" else "⚙️"
+                            preview = content[:50].replace("\n", " ") + "..." if len(content) > 50 else content.replace("\n", " ")
+                            topic_readme_lines.append(f"- {role_emoji} [{msg_filename}]({msg_filename}.md) - {preview}")
+                        
+                        # 写入主题README
+                        topic_readme_path = str(topic_dir / "README.md")
+                        topic_readme_content = "\n".join(topic_readme_lines)
+                        topic_created = topic.get("createdAt") if topic else None
+                        _, topic_modified = get_time_range_from_messages(messages)
+                        write_file_with_timestamp(topic_readme_path, topic_readme_content, topic_created, topic_modified)
+                        file_count += 1
+            
+            # 写入总索引
             (export_path / "index.md").write_text("\n".join(index_lines), encoding='utf-8')
             file_count += 1
             
@@ -377,14 +794,21 @@ class LobeChatDataExporter:
     
     def show_about(self):
         """显示关于对话框"""
-        about_text = """LobeChat 数据导出工具 v2.0
+        from ..config import VERSION, APP_NAME, AUTHOR, GITHUB_URL
+        about_text = f"""{APP_NAME} v{VERSION}
+
+作者：{AUTHOR}
+GitHub：{GITHUB_URL}
 
 功能特性：
 • 解析LobeChat导出的JSON数据
-• 按目录结构导出Markdown
-• 导出单个对话/整合对话
-• 自定义JSON模块导出
-• 右键菜单批量操作
+• 二级标签页结构（数据一览 + 其他数据）
+• 多种表格视图（模型、提供商、助手、主题、消息）
+• 全局搜索与定位功能
+• 多种Markdown导出模式
+• JSON模块自由选择导出
+• 文件时间戳匹配真实消息时间
+• 表格导出CSV/Excel
 • 暗黑/明亮主题切换
 
 开发：基于Python + ttkbootstrap
@@ -443,3 +867,26 @@ class LobeChatDataExporter:
         except Exception as e:
             if ENABLE_DEBUG:
                 print(f"DEBUG: 保存配置失败: {e}")
+    
+    def _bind_context_menu(self, tree_widget):
+        """
+        绑定右键菜单事件到树形视图
+        
+        Args:
+            tree_widget: Treeview控件
+        """
+        if not tree_widget or not self.context_menu_manager:
+            return
+        
+        # Windows/Linux 右键
+        tree_widget.bind("<Button-3>", self.context_menu_manager.show_context_menu)
+        
+        # macOS 右键（某些配置下）
+        tree_widget.bind("<Button-2>", self.context_menu_manager.show_context_menu)
+        
+        # macOS Control+左键（部分Mac用户习惯）
+        if self.is_macos:
+            tree_widget.bind("<Control-Button-1>", self.context_menu_manager.show_context_menu)
+        
+        if ENABLE_DEBUG:
+            self.log_message("DEBUG: 右键菜单事件已绑定", "DEBUG")

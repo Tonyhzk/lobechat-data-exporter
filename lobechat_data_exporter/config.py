@@ -3,8 +3,14 @@
 所有应用程序配置常量
 """
 
+# ========== 版本信息 ==========
+VERSION = "3.0.0"
+APP_NAME = "LobeChat 数据导出工具"
+AUTHOR = "Tony坤少"
+GITHUB_URL = "https://github.com/Tonyhzk/lobechat-data-exporter"
+
 # ========== 窗口设置 ==========
-WINDOW_TITLE = "LobeChat 数据导出工具"
+WINDOW_TITLE = f"{APP_NAME} v{VERSION}"
 WINDOW_WIDTH = 1000
 WINDOW_HEIGHT = 900
 WINDOW_MIN_WIDTH = 1000

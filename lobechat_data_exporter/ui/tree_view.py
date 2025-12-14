@@ -3,6 +3,7 @@
 负责管理数据树的显示和更新
 """
 
+import re
 from tkinter import ttk
 from ttkbootstrap.constants import *
 from ..utils.file_utils import format_datetime
@@ -38,10 +39,10 @@ class TreeViewController:
         tree_scroll_x = ttk.Scrollbar(tree_container, orient=HORIZONTAL)
         tree_scroll_x.pack(side=BOTTOM, fill=X)
         
-        # Treeview
+        # Treeview - 增加主题数和消息数两列
         self.tree = ttk.Treeview(
             tree_container,
-            columns=("type", "count", "time", "id"),
+            columns=("type", "topics", "messages", "time", "id"),
             show="tree headings",
             yscrollcommand=tree_scroll_y.set,
             xscrollcommand=tree_scroll_x.set,
@@ -55,18 +56,24 @@ class TreeViewController:
         # 配置列和绑定排序事件
         self.tree.heading("#0", text="名称", command=lambda: self.sort_by_column("#0", False))
         self.tree.heading("type", text="类型", command=lambda: self.sort_by_column("type", False))
-        self.tree.heading("count", text="数量", command=lambda: self.sort_by_column("count", True))
+        self.tree.heading("topics", text="主题数", command=lambda: self.sort_by_column("topics", True))
+        self.tree.heading("messages", text="消息数", command=lambda: self.sort_by_column("messages", True))
         self.tree.heading("time", text="时间", command=lambda: self.sort_by_column("time", False))
         self.tree.heading("id", text="ID", command=lambda: self.sort_by_column("id", False))
         
         self.tree.column("#0", width=280)
         self.tree.column("type", width=60)
-        self.tree.column("count", width=100)
+        self.tree.column("topics", width=70)
+        self.tree.column("messages", width=70)
         self.tree.column("time", width=150)
         self.tree.column("id", width=100)
         
         # 配置样式
         self.configure_style(self.app.current_theme)
+        
+        # 绑定批量选择事件
+        self.tree.bind("<Control-Button-1>", self.on_ctrl_click)
+        self.tree.bind("<Shift-Button-1>", self.on_shift_click)
     
     def configure_style(self, theme):
         """配置树形视图样式"""
@@ -105,48 +112,35 @@ class TreeViewController:
             agent_label = group["agentLabel"]
             agent_id = group["agentId"]
             
-            session_count = len(group["sessions"])
+            # 统计主题和消息数量（由于一个助手只有一个会话，直接统计所有主题）
             topic_count = sum(len(s["topics"]) for s in group["sessions"])
+            msg_count = sum(len(t["messages"]) for s in group["sessions"] for t in s["topics"])
             
             agent_node = self.tree.insert(
                 "",
                 "end",
                 text=agent_label,
-                values=("助手", f"{session_count}会话 / {topic_count}主题", "", agent_id),
+                values=("助手", topic_count, msg_count, "", agent_id),
                 tags=("agent",)
             )
             
-            # 添加会话节点
+            # 直接添加主题节点到助手下（跳过会话层级，因为一个助手只有一个会话）
             for session_group in group["sessions"]:
-                session_label = session_group["sessionLabel"]
-                session_id = session_group["sessionId"]
-                
-                topic_count_in_session = len(session_group["topics"])
-                msg_count_in_session = sum(len(t["messages"]) for t in session_group["topics"])
-                
-                session_node = self.tree.insert(
-                    agent_node,
-                    "end",
-                    text=session_label,
-                    values=("会话", f"{topic_count_in_session}主题 / {msg_count_in_session}消息", "", session_id),
-                    tags=("session",)
-                )
-                
                 # 添加主题节点
                 for topic_group in session_group["topics"]:
                     topic_label = topic_group["topicLabel"]
                     topic_id = topic_group["topicId"]
-                    msg_count = len(topic_group["messages"])
+                    msg_count_in_topic = len(topic_group["messages"])
                     
                     created_at = ""
                     if topic_group["topic"]:
                         created_at = format_datetime(topic_group["topic"].get("createdAt"))
                     
                     topic_node = self.tree.insert(
-                        session_node,
+                        agent_node,
                         "end",
                         text=topic_label,
-                        values=("主题", f"{msg_count}消息", created_at, topic_id),
+                        values=("主题", "", msg_count_in_topic, created_at, topic_id),
                         tags=("topic",)
                     )
                     
@@ -172,27 +166,34 @@ class TreeViewController:
                             topic_node,
                             "end",
                             text=msg_label,
-                            values=("消息", "", msg_time, msg_id),
+                            values=("消息", "", "", msg_time, msg_id),
                             tags=("message",)
                         )
     
     def sort_by_column(self, col, is_numeric):
         """
-        点击表头排序
+        点击表头排序 - 根据用户选中的节点决定排序哪一级
         
         Args:
             col: 列标识
             is_numeric: 是否为数值列
         """
-        # 获取当前父节点的所有子项
-        parent = self.tree.focus()
-        if not parent:
+        # 获取用户当前选中的项
+        selection = self.tree.selection()
+        
+        if selection:
+            # 有选中项：获取该项的父节点，排序同级兄弟节点
+            selected_item = selection[0]
+            parent = self.tree.parent(selected_item)
+        else:
+            # 没有选中项：排序根级别节点
             parent = ""
         
-        # 获取所有子项
+        # 获取该父节点下的所有子项
         items = [(self.tree.item(child), child) for child in self.tree.get_children(parent)]
         
         if not items:
+            self.app.log_message("没有可排序的项目", "INFO")
             return
         
         # 判断是否需要反转排序
@@ -207,18 +208,20 @@ class TreeViewController:
             # 按名称排序
             items.sort(key=lambda x: x[0]["text"].lower(), reverse=self.sort_reverse)
         elif is_numeric:
-            # 按数值排序（提取数字部分）
+            # 按数值排序
             def extract_number(item):
-                value = item[0]["values"][self.tree["columns"].index(col)]
-                # 尝试提取第一个数字
-                import re
+                col_index = list(self.tree["columns"]).index(col)
+                value = item[0]["values"][col_index]
+                # 尝试提取数字
+                if isinstance(value, (int, float)):
+                    return value
                 numbers = re.findall(r'\d+', str(value))
                 return int(numbers[0]) if numbers else 0
             
             items.sort(key=extract_number, reverse=self.sort_reverse)
         else:
             # 按文本排序
-            col_index = self.tree["columns"].index(col)
+            col_index = list(self.tree["columns"]).index(col)
             items.sort(key=lambda x: str(x[0]["values"][col_index]).lower(), reverse=self.sort_reverse)
         
         # 重新排列
@@ -238,7 +241,86 @@ class TreeViewController:
             else:
                 self.tree.heading(column, text=current_text)
         
-        # 记录日志
+        # 记录日志，显示排序的级别
         sort_direction = "降序" if self.sort_reverse else "升序"
         col_name = self.tree.heading(col)["text"].replace(" ▲", "").replace(" ▼", "")
-        self.app.log_message(f"按 '{col_name}' 列{sort_direction}排序", "INFO")
+        
+        if parent == "":
+            level_name = "根级别（助手）"
+        else:
+            parent_type = self.tree.item(parent, "values")[0] if self.tree.item(parent, "values") else ""
+            if parent_type == "助手":
+                level_name = "主题级别"
+            elif parent_type == "主题":
+                level_name = "消息级别"
+            else:
+                level_name = "当前级别"
+        
+        self.app.log_message(f"按 '{col_name}' 列{sort_direction}排序 ({level_name}，共{len(items)}项)", "INFO")
+    
+    def on_ctrl_click(self, event):
+        """Ctrl+点击多选"""
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return "break"
+        
+        # 获取当前选中项
+        current_selection = self.tree.selection()
+        
+        if item in current_selection:
+            # 如果已选中，则取消选中
+            self.tree.selection_remove(item)
+        else:
+            # 添加到选中列表
+            self.tree.selection_add(item)
+        
+        return "break"
+    
+    def on_shift_click(self, event):
+        """Shift+点击连续选择"""
+        item = self.tree.identify_row(event.y)
+        if not item:
+            return "break"
+        
+        # 获取当前选中项
+        current_selection = self.tree.selection()
+        
+        if not current_selection:
+            # 如果没有选中项，直接选中
+            self.tree.selection_set(item)
+            return "break"
+        
+        # 获取第一个选中项
+        first_item = current_selection[0]
+        
+        # 获取所有项目
+        all_items = self.get_all_items()
+        
+        try:
+            first_index = all_items.index(first_item)
+            last_index = all_items.index(item)
+            
+            # 确保顺序正确
+            if first_index > last_index:
+                first_index, last_index = last_index, first_index
+            
+            # 选中范围内的所有项目
+            for i in range(first_index, last_index + 1):
+                self.tree.selection_add(all_items[i])
+        except ValueError:
+            pass
+        
+        return "break"
+    
+    def get_all_items(self):
+        """获取所有树项目（扁平列表）"""
+        items = []
+        
+        def traverse(item=''):
+            children = self.tree.get_children(item)
+            for child in children:
+                items.append(child)
+                traverse(child)
+        
+        traverse()
+        return items

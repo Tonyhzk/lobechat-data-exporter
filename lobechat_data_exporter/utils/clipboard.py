@@ -22,3 +22,7 @@ class ClipboardManager:
         self.master.clipboard_clear()
         self.master.clipboard_append(text)
         self.master.update()
+    
+    def copy_text(self, text: str):
+        """复制文本到剪贴板（别名方法）"""
+        self.copy_to_clipboard(text)
