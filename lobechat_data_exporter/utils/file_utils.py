@@ -107,12 +107,13 @@ def get_app_path() -> Path:
         return Path(__file__).parent.parent.parent
 
 
-def parse_datetime_str(dt_str: Optional[str]) -> Optional[datetime]:
+def parse_datetime_str(dt_str) -> Optional[datetime]:
     """
-    解析ISO格式的日期时间字符串为datetime对象
+    解析日期时间为datetime对象
+    支持多种格式：ISO字符串、datetime对象、时间戳
     
     Args:
-        dt_str: ISO格式的日期时间字符串
+        dt_str: 日期时间（字符串、datetime对象或时间戳）
     
     Returns:
         datetime对象，解析失败返回None
@@ -120,14 +121,31 @@ def parse_datetime_str(dt_str: Optional[str]) -> Optional[datetime]:
     if not dt_str:
         return None
     
-    try:
-        dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-        # 转换为本地时间（去掉时区信息）
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-        return dt
-    except:
-        return None
+    # 如果已经是datetime对象，直接返回（去掉时区信息）
+    if isinstance(dt_str, datetime):
+        if dt_str.tzinfo is not None:
+            return dt_str.replace(tzinfo=None)
+        return dt_str
+    
+    # 如果是字符串，尝试解析
+    if isinstance(dt_str, str):
+        try:
+            dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+            # 转换为本地时间（去掉时区信息）
+            if dt.tzinfo is not None:
+                dt = dt.replace(tzinfo=None)
+            return dt
+        except:
+            return None
+    
+    # 如果是数字（时间戳），转换为datetime
+    if isinstance(dt_str, (int, float)):
+        try:
+            return datetime.fromtimestamp(dt_str)
+        except:
+            return None
+    
+    return None
 
 
 def set_file_times(file_path: str, created_at: Optional[str] = None, 
@@ -208,6 +226,7 @@ def set_file_times(file_path: str, created_at: Optional[str] = None,
 def get_time_range_from_messages(messages: list) -> Tuple[Optional[str], Optional[str]]:
     """
     从消息列表中获取时间范围（最早创建时间和最晚修改时间）
+    支持驼峰命名(createdAt)和蛇形命名(created_at)
     
     Args:
         messages: 消息列表
@@ -222,8 +241,9 @@ def get_time_range_from_messages(messages: list) -> Tuple[Optional[str], Optiona
     latest_modified = None
     
     for msg in messages:
-        created_at = msg.get("createdAt")
-        updated_at = msg.get("updatedAt") or created_at
+        # 同时支持驼峰命名和蛇形命名
+        created_at = msg.get("createdAt") or msg.get("created_at")
+        updated_at = msg.get("updatedAt") or msg.get("updated_at") or created_at
         
         if created_at:
             created_dt = parse_datetime_str(created_at)

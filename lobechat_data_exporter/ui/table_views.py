@@ -832,6 +832,64 @@ class AgentsTableViewController(BaseTableViewController):
     def __init__(self, parent, app):
         """初始化助手表视图"""
         super().__init__(parent, app, self.COLUMNS)
+        
+        # 添加助手表特有的右键菜单项
+        self._add_agent_context_menu_items()
+    
+    def _add_agent_context_menu_items(self):
+        """添加助手表特有的右键菜单项"""
+        menu = self.cell_selection_manager.context_menu
+        menu.add_separator()
+        menu.add_command(label="📝 复制助手提示词", command=self._copy_agent_prompt)
+    
+    def _copy_agent_prompt(self):
+        """复制选中助手的系统提示词到剪切板"""
+        # 获取选中的行
+        if self.cell_selection_manager.select_entire_row:
+            selected_items = self.tree.selection()
+        else:
+            selected_items = list(set(cell[0] for cell in self.cell_selection_manager.selected_cells))
+        
+        if not selected_items:
+            if self.app:
+                self.app.log_message("请先选择一个助手", "INFO")
+            return
+        
+        # 获取第一个选中行的助手ID
+        item = selected_items[0]
+        values = self.tree.item(item, "values")
+        if len(values) < 2:
+            return
+        
+        agent_id = values[1]  # 第2列是助手ID
+        
+        # 从原始数据中获取助手的系统提示词
+        if not self.app or not hasattr(self.app, 'parsed_data') or not self.app.parsed_data:
+            if self.app:
+                self.app.log_message("请先加载数据", "WARNING")
+            return
+        
+        raw_data = self.app.parsed_data.get("raw", {})
+        agents = raw_data.get("data", {}).get("agents", [])
+        
+        for agent in agents:
+            if agent.get("id") == agent_id:
+                system_role = agent.get("systemRole", "")
+                if system_role:
+                    if hasattr(self.app, 'clipboard_manager'):
+                        self.app.clipboard_manager.copy_text(system_role)
+                    else:
+                        self.tree.clipboard_clear()
+                        self.tree.clipboard_append(system_role)
+                    
+                    agent_name = get_agent_display_name(agent)
+                    self.app.log_message(f"✅ 已复制助手 [{agent_name}] 的提示词到剪切板", "SUCCESS")
+                else:
+                    agent_name = get_agent_display_name(agent)
+                    self.app.log_message(f"该助手 [{agent_name}] 没有系统提示词", "WARNING")
+                return
+        
+        self.app.log_message("未找到该助手的数据", "WARNING")
     
     def update_table(self, parsed_data: Dict):
         """更新助手表数据"""

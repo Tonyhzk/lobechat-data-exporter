@@ -19,6 +19,16 @@ def create_toolbar(master, app):
     toolbar = ttk.Frame(master)
     toolbar.pack(fill=X, padx=10, pady=5)
     
+    # 数据库连接按钮
+    db_btn = ttk.Button(
+        toolbar,
+        text="🗄️ 数据库",
+        command=app.show_db_connection_dialog,
+        bootstyle="warning-outline",
+        width=BUTTON_WIDTH
+    )
+    db_btn.pack(side=LEFT, padx=5)
+    
     # 主题切换按钮
     theme_btn = ttk.Button(
         toolbar,

@@ -4,7 +4,7 @@
 """
 
 # ========== 版本信息 ==========
-VERSION = "3.0.0"
+VERSION = "4.0.0"
 APP_NAME = "LobeChat 数据导出工具"
 AUTHOR = "Tony坤少"
 GITHUB_URL = "https://github.com/Tonyhzk/lobechat-data-exporter"

@@ -16,6 +16,8 @@ from typing import Dict, Optional
 
 from ..config import *
 from ..core.parser import LobeChatParser
+from ..core.db_connector import DBConfig, PostgreSQLConnector
+from ..core.db_parser import DatabaseParser
 from ..exporters.markdown_exporter import MarkdownExporter
 from ..exporters.json_exporter import JSONExporter
 from ..utils.clipboard import ClipboardManager
@@ -792,6 +794,128 @@ class LobeChatDataExporter:
         else:
             messagebox.showinfo("提示", "请先选择并解析JSON文件！")
     
+    # ==================== 数据库功能 ====================
+    
+    def _update_db_stats(self, connector: PostgreSQLConnector, user_id: Optional[str] = None):
+        """
+        更新数据库统计信息（仅执行COUNT查询，不加载详细数据）
+        
+        Args:
+            connector: 数据库连接器
+            user_id: 用户ID（可选）
+        """
+        try:
+            # 统计助手数量
+            agent_query = "SELECT COUNT(*) as count FROM agents"
+            if user_id:
+                agent_query += f" WHERE user_id = '{user_id}'"
+            agent_result = connector.execute_query(agent_query)
+            agent_count = agent_result[0]["count"] if agent_result else 0
+            
+            # 统计主题数量
+            topic_query = "SELECT COUNT(*) as count FROM topics"
+            if user_id:
+                topic_query += f" WHERE user_id = '{user_id}'"
+            topic_result = connector.execute_query(topic_query)
+            topic_count = topic_result[0]["count"] if topic_result else 0
+            
+            # 统计消息数量
+            message_query = "SELECT COUNT(*) as count FROM messages"
+            if user_id:
+                message_query += f" WHERE user_id = '{user_id}'"
+            message_result = connector.execute_query(message_query)
+            message_count = message_result[0]["count"] if message_result else 0
+            
+            # 更新UI显示
+            self.stat_labels["agentCount"].config(text=str(agent_count))
+            self.stat_labels["topicCount"].config(text=str(topic_count))
+            self.stat_labels["messageCount"].config(text=str(message_count))
+            
+            self.log_message(f"📊 统计信息: {agent_count}个助手, {topic_count}个主题, {message_count}条消息", "INFO")
+            
+        except Exception as e:
+            self.log_message(f"获取统计信息失败: {str(e)}", "WARNING")
+    
+    def show_db_connection_dialog(self):
+        """显示数据库连接对话框"""
+        from .db_dialog import show_db_connection_dialog
+        
+        # 从配置中获取上次的数据库配置
+        db_config = self.config.get("db_config", {})
+        
+        show_db_connection_dialog(
+            self.master,
+            callback=self._on_db_connected,
+            log_callback=self.log_message,
+            initial_config=db_config
+        )
+    
+    def _on_db_connected(self, connector: PostgreSQLConnector, config: Dict):
+        """
+        数据库连接成功的回调 - 使用懒加载模式
+        
+        Args:
+            connector: 数据库连接器
+            config: 连接配置
+        """
+        self.log_message("数据库连接成功，正在初始化...", "INFO")
+        
+        try:
+            # 保存数据库配置
+            save_password = config.get("save_password", False)
+            if save_password:
+                # 用户选择了保存密码
+                safe_config = {k: v for k, v in config.items()}
+            else:
+                # 不保存密码
+                safe_config = {k: v for k, v in config.items() if k != "password"}
+            self.config["db_config"] = safe_config
+            self.save_config()
+            
+            # 更新文件路径显示
+            self.file_path_var.set(f"🗄️ 数据库: {config['host']}:{config['port']}/{config['database']}")
+            self.json_file_path = None  # 清除JSON文件路径
+            
+            # 获取统计信息（快速COUNT查询，不加载详细数据）
+            user_id = config.get("user_id")
+            self._update_db_stats(connector, user_id)
+            
+            # 使用新的懒加载数据库标签页
+            if hasattr(self, 'data_tabs_controller') and hasattr(self.data_tabs_controller, 'set_db_connection'):
+                # 传递连接器给数据库标签页控制器（不断开连接，由标签页控制器管理）
+                self.data_tabs_controller.set_db_connection(connector, config)
+                self.log_message("✅ 数据库连接已建立，数据将按需加载", "SUCCESS")
+            else:
+                # 兼容旧模式：一次性加载所有数据
+                self.log_message("使用兼容模式：一次性加载数据...", "INFO")
+                user_id = config.get("user_id")
+                db_parser = DatabaseParser(connector, log_callback=self.log_message)
+                self.parsed_data = db_parser.parse(user_id)
+                
+                # 更新UI
+                self.update_stats()
+                
+                # 更新数据选项卡控制器
+                if hasattr(self, 'data_tabs_controller'):
+                    self.data_tabs_controller.update_data(self.parsed_data)
+                elif hasattr(self, 'tree_controller'):
+                    self.tree_controller.update_tree(self.parsed_data)
+                
+                self.log_message("✅ 数据库数据读取成功！", "SUCCESS")
+                
+                # 断开连接（数据已经读取完成）
+                connector.disconnect()
+            
+        except Exception as e:
+            self.log_message(f"❌ 数据库连接失败: {str(e)}", "ERROR")
+            messagebox.showerror("连接失败", f"数据库操作失败：\n{str(e)}")
+            
+            # 确保断开连接
+            try:
+                connector.disconnect()
+            except:
+                pass
+    
     def show_about(self):
         """显示关于对话框"""
         from ..config import VERSION, APP_NAME, AUTHOR, GITHUB_URL
@@ -800,14 +924,21 @@ class LobeChatDataExporter:
 作者：{AUTHOR}
 GitHub：{GITHUB_URL}
 
-功能特性：
+最新特性 (v4.0)：
+• 🗄️ 数据库直连：支持PostgreSQL直接连接
+• 🔄 懒加载机制：按需加载，性能大幅提升
+• 📁 分割导出：支持助手/主题/消息三级分割
+• 🎯 精准时间戳：导出时间与数据库完全匹配
+• 📋 完整数据：从数据库读取完整内容不截断
+• 💾 批量加载：支持大数据量分批加载
+• 🔃 重载功能：支持刷新选中项数据
+
+核心功能：
 • 解析LobeChat导出的JSON数据
-• 二级标签页结构（数据一览 + 其他数据）
-• 多种表格视图（模型、提供商、助手、主题、消息）
+• 多种表格视图与树形结构查看
 • 全局搜索与定位功能
 • 多种Markdown导出模式
 • JSON模块自由选择导出
-• 文件时间戳匹配真实消息时间
 • 表格导出CSV/Excel
 • 暗黑/明亮主题切换
 

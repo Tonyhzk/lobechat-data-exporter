@@ -106,6 +106,7 @@ class DataTabsController:
         self._create_main_tab()      # 主要数据一览（全部对话）
         self._create_other_tabs()    # 其他数据模块
         self._create_export_tab()    # 全部导出标签页
+        self._create_database_tab()  # 数据库标签页
         
         # 保持兼容性：notebook指向主notebook
         self.notebook = self.main_notebook
@@ -1564,6 +1565,37 @@ class DataTabsController:
             bootstyle="info",
             width=20
         ).pack(side=LEFT, padx=10)
+    
+    def _create_database_tab(self):
+        """创建数据库标签页（懒加载模式）"""
+        from .db_tab import DatabaseTabController
+        
+        # 数据库容器
+        db_tab_frame = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(db_tab_frame, text="🗄️ 数据库")
+        
+        # 创建数据库标签页控制器
+        self.db_tab_controller = DatabaseTabController(db_tab_frame, self.app)
+        
+        # 添加到tabs字典
+        self.tabs["database"] = {
+            "type": "database",
+            "controller": self.db_tab_controller,
+            "frame": db_tab_frame
+        }
+    
+    def set_db_connection(self, connector, config):
+        """
+        设置数据库连接
+        
+        Args:
+            connector: 数据库连接器
+            config: 连接配置
+        """
+        if hasattr(self, 'db_tab_controller'):
+            self.db_tab_controller.set_connection(connector, config)
+            # 切换到数据库标签页
+            self.main_notebook.select(3)  # 数据库标签页索引为3
     
     def _export_markdown(self):
         """导出Markdown"""
